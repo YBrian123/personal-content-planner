@@ -8,7 +8,7 @@
 
 fieldset.drawer-body{border:0;margin:0;min-width:0}
 
-.qa-banner{position:fixed;top:0;left:0;right:0;z-index:100;background:#795f21;color:#fff6d8;font-size:10px;padding:6px 12px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}.qa-banner button{font-size:9px;padding:2px 7px}body:has(.qa-banner) .shell{padding-top:36px}body:has(.qa-banner) .sidebar{top:36px}
+.qa-banner{position:fixed;top:0;left:0;right:0;z-index:100;background:#795f21;color:#fff6d8;font-size:10px;padding:6px 12px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}.qa-banner button{font-size:9px;padding:2px 7px}body:has(.qa-banner) .shell{padding-top:var(--qa-banner-height,36px)}body:has(.qa-banner) .sidebar{top:var(--qa-banner-height,36px)}
 
 .scope-chips{display:flex;gap:16px;align-items:center;margin:-12px 0 20px;font-size:10px;color:#849177;flex-wrap:wrap}.direction-name small,.direction>button small{font-size:9px;color:#9da78c;margin-left:5px}.section-heading{margin:30px 0 18px}.effort-list button{font-size:10px;padding:3px 7px;margin:5px 5px 0 0}
 
@@ -16,3 +16,5 @@ fieldset.drawer-body{border:0;margin:0;min-width:0}
 /* Readable supporting text at desktop and narrow widths. */
 .sidebar nav button{font-size:14px}.direction-name,.direction>button{font-size:12px}.sidebar-label{font-size:11px}.stat>small{font-size:12px}.stat>span{font-size:11px;line-height:1.7}.item-title{font-size:14px}.item-meta,.platform,.status{font-size:11px}.table-meta{font-size:11px}.time-cell,td{font-size:12px}.muted,.welcome-card p{color:#687363}.drawer>footer span{font-size:12px}.history time{color:#5f6f59}.filters input,.filters select{font-size:12px}.info-card p{line-height:1.8}.heading-row p{font-size:13px}.scope-chips{font-size:12px}
 @media(max-width:760px){.brand strong{font-size:17px}nav button{font-size:12px!important;min-height:36px}.direction-name,.direction>button{font-size:12px}.main-content{padding-left:16px;padding-right:16px}.stat>small,.stat>span{font-size:11px}.stat .time-stat{font-size:16px}.item-title{font-size:14px}.item-meta,.platform,.status,.table-meta{font-size:11px}.filters input,.filters select,.heading-row .primary{font-size:13px}.heading-row .primary{min-height:40px}td:nth-child(4),td:nth-child(5){font-size:12px}td:last-child button{min-height:40px}.drawer input,.drawer select,.drawer textarea{font-size:14px}.drawer>footer{padding-bottom:max(14px,env(safe-area-inset-bottom))}.welcome-features{font-size:11px}}
+
+body:has(.qa-banner) .drawer-shade{top:var(--qa-banner-height,36px)}

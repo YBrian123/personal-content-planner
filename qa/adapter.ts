@@ -1,6 +1,7 @@
 // Development-only browser fixture. Vite refuses to build this mode.
 // It executes the real migrations in an isolated PostgreSQL engine, without cloud access.
 import {PGlite} from '@electric-sql/pglite';
+import {drafts} from '../src/drafts';
 import initial from '../supabase/migrations/001_planner.sql?raw';
 import hardening from '../supabase/migrations/002_workflow_hardening.sql?raw';
 import integrity from '../supabase/migrations/003_time_and_closure_integrity.sql?raw';
@@ -12,6 +13,12 @@ document.querySelectorAll('.qa-banner').forEach(n=>n.remove());
 const banner=document.createElement('div');banner.className='qa-banner';banner.textContent='开发验收环境 · 独立临时数据 · 不连接云端';document.body.prepend(banner);
 let failNext='';
 for(const [text,kind] of [['下次提交前断开','before'],['下次提交后丢响应','after'],['下次延迟回复 8 秒','delay']]){const button=document.createElement('button');button.textContent=text;button.onclick=()=>{failNext=kind;button.textContent='已安排故障';setTimeout(()=>button.textContent=text,2000);};banner.append(button);}
+let failDraftClear=false;
+const originalClearUser=drafts.clearUser;
+drafts.clearUser=async user=>{if(failDraftClear){failDraftClear=false;throw new Error('验收注入：浏览器草稿清理失败');}return originalClearUser(user);};
+const clearFailure=document.createElement('button');clearFailure.textContent='下次退出时模拟缓存故障';clearFailure.onclick=()=>{failDraftClear=true;clearFailure.textContent='已安排缓存故障';};banner.append(clearFailure);
+const bannerSize=new ResizeObserver(()=>document.documentElement.style.setProperty('--qa-banner-height',banner.offsetHeight+'px'));bannerSize.observe(banner);
+import.meta.hot?.dispose(()=>bannerSize.disconnect());
 const database=new PGlite();
 const ready=(async()=>{
   await database.exec("create role anon;create role authenticated;create schema auth;create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;grant usage on schema auth to authenticated;grant execute on function auth.uid() to authenticated;");

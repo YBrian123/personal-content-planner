@@ -112,6 +112,15 @@ export default function App(){
       if(token===epoch.current&&selectedId.current===row.id&&selectionSequence===detailSequence.current)setSelected(detail.record as Row<Item>);
     }
   }
+  async function signOut(){
+    const user=sessionRef.current?.user.id;if(!user)return;
+    if((dirty.current||pending)&&!confirm('退出会清理本入口的私人草稿和待确认请求。请先核对保存结果或复制内容，确定退出？'))return;
+    epoch.current++;sessionRef.current=null;setSession(null);setCtx(null);setList(null);setSelected(null);setResources([]);setClosures([]);setSnapshots([]);setBackup(null);setPending(null);setBusy(false);dirty.current=false;
+    const problems:string[]=[];
+    try{await logout();}catch(e){problems.push('退出确认：'+errorText(e));}
+    try{await drafts.clearUser(user);}catch(e){problems.push('本机草稿未清除：'+errorText(e));}
+    setError(problems.join('；'));setNotice(problems.length?'页面已锁定，请核对退出提示。':'已退出，已清理本机草稿。');
+  }
   async function createGroup(kind:'direction'|'plan'){
     if(!ctx)return;const name=prompt(kind==='direction'?'新方向名称':'新计划名称');if(!name?.trim())return;
     const current=ctx.records.find(r=>r.id===plan);
@@ -167,7 +176,7 @@ export default function App(){
       <label className="show-archived"><input type="checkbox" checked={showArchived} onChange={e=>setShowArchived(e.target.checked)}/>显示归档方向与计划</label>
       <div className="sidebar-footer"><i className={ctx?'online':''}/>{ctx?'已连接个人数据':'等待连接'}<small>记录、安排、完成、回看</small></div>
     </aside>
-    <main className="main"><header className="topbar"><span>{pageName[page]||'计划表'}</span><div>{session&&<><span className="user">{session.user.user_metadata.user_name||'本人'}</span><button className="link-button" onClick={async()=>{if(dirty.current&&!confirm('退出会清理本入口的私人草稿。请先保存或复制，确定退出？'))return;try{await drafts.clearUser(session.user.id);await logout();}catch(e){setError(errorText(e));}}}>退出</button></>}<span className="date">{chinaDate()}</span></div></header>
+    <main className="main"><header className="topbar"><span>{pageName[page]||'计划表'}</span><div>{session&&<><span className="user">{session.user.user_metadata.user_name||'本人'}</span><button className="link-button" onClick={signOut}>退出</button></>}<span className="date">{chinaDate()}</span></div></header>
       <div className="main-content">
       {error&&<div className="alert" role="alert">{error}<button onClick={()=>setError('')} aria-label="关闭错误">×</button></div>}
       {notice&&<div className="notice" role="status">{notice}{pending&&<><span>原操作时间：{dateTime(String(pending.payload.occurredAt||''))}</span><button disabled={busy} onClick={()=>void perform(pending)}>核对并重试</button></>}</div>}

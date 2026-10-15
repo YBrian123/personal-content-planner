@@ -19,12 +19,14 @@ beforeAll(async()=>{
 afterAll(async()=>{await db.close();});
 it('fixed owner enforced on tables and every RPC; direct writes and helpers denied',async()=>{
   await expect(db.query("update public.planner_records set data='{}'")).rejects.toThrow('permission denied');
-  await expect(fn('planner_payload')).rejects.toThrow('permission denied');
+  for(const [name,args] of [['planner_payload',[]],['planner_take_snapshot',['test']],['planner_validate',['item',JSON.stringify({title:'拒绝直接调用'})]],['planner_capture_baselines',[]]] as Array<[string,unknown[]]>)await expect(fn(name,args)).rejects.toThrow('permission denied');
   await db.query("select set_config('request.jwt.claim.sub',$1,false)",[other]);
   expect((await db.query('select * from public.planner_records')).rows).toHaveLength(0);
-  await expect(fn('planner_context')).rejects.toThrow('FORBIDDEN');
+  const endpoints:Array<[string,unknown[]]>=[['planner_context',[]],['planner_list',[plan,'{}',0,50]],['planner_detail',[item.id,0]],['planner_export',[]],['planner_execute',[randomUUID(),ctx.generation,'restore','{}',ctx.revision]]];
+  for(const [name,args] of endpoints)await expect(fn(name,args)).rejects.toThrow('FORBIDDEN');
+  expect((await db.query('select * from public.planner_snapshots')).rows).toHaveLength(0);
   await db.exec('reset role;set role anon');
-  await expect(fn('planner_context')).rejects.toThrow('permission denied');
+  for(const [name,args] of endpoints)await expect(fn(name,args)).rejects.toThrow('permission denied');
   await db.exec('reset role;set role authenticated');
   await db.query("select set_config('request.jwt.claim.sub',$1,false)",[owner]);
 });
@@ -160,3 +162,24 @@ it('website name is owner business data with server validation',async()=>{
   await expect(exec('edit',{id:r.id,changes:{value:{bad:true}}},r.revision)).rejects.toThrow('INVALID_TEXT');
   await expect(exec('create',{kind:'settings',data:{name:'baseline:plan',value:{}}})).rejects.toThrow('INVALID_KIND');
 });
+
+it('snapshot count and real byte budget prune old snapshots without removing the new one',async()=>{
+  await db.exec('reset role;delete from public.planner_snapshots;set role authenticated');
+  let r=(await fn<{record:Row<Item>}>('planner_detail',[item.id])).record;
+  for(let n=0;n<33;n++)r=(await exec('move',{id:r.id,parent_id:r.parent_id},r.revision)).record;
+  expect((await db.query<{n:number}>('select count(*)::int as n from public.planner_snapshots')).rows[0].n).toBe(30);
+  await db.exec('reset role;delete from public.planner_snapshots');
+  await db.query("insert into public.planner_snapshots(owner_id,reason,payload,bytes,created_at) select $1,'budget_fixture',p,octet_length(p::text),now()-interval '1 day'+n*interval '1 second' from generate_series(1,29)n cross join lateral (select jsonb_build_object('schemaVersion',1,'records','[]'::jsonb,'padding',repeat('x',2000000)) as p)q",[owner]);
+  expect(Number((await db.query<{bytes:string}>('select sum(bytes) as bytes from public.planner_snapshots')).rows[0].bytes)).toBeGreaterThan(50*1024*1024);
+  await db.exec('set role authenticated');await exec('move',{id:r.id,parent_id:r.parent_id},r.revision);
+  const result=(await db.query<{n:number;bytes:string;newest:number}>("select count(*)::int as n,sum(bytes) as bytes,count(*) filter(where reason='move')::int as newest from public.planner_snapshots")).rows[0];
+  expect(result.n).toBeLessThanOrEqual(30);expect(Number(result.bytes)).toBeLessThanOrEqual(50*1024*1024);expect(result.newest).toBe(1);
+});
+it('oversized pre-operation snapshot stops the mutation and leaves revision and row unchanged',async()=>{
+  await db.exec('reset role');
+  const padding=(await db.query<{id:string}>("insert into public.planner_records(owner_id,kind,data) values($1,'settings',jsonb_build_object('name','size_fixture','value',repeat('x',52428800))) returning id",[owner])).rows[0].id;
+  await db.exec('set role authenticated');const before=await fn<{record:Row<Item>}>('planner_detail',[item.id]);const revision=ctx.revision;
+  await expect(exec('move',{id:item.id,parent_id:plan},before.record.revision)).rejects.toThrow('SNAPSHOT_BUDGET');
+  expect((await fn<Context>('planner_context')).revision).toBe(revision);expect((await fn<{record:Row<Item>}>('planner_detail',[item.id])).record).toEqual(before.record);
+  await db.exec('reset role');await db.query('delete from public.planner_records where id=$1',[padding]);await db.exec('set role authenticated');
+},30000);
