@@ -55,7 +55,7 @@ Mac 双击 `启动网站.command`，浏览器打开 `http://127.0.0.1:18765/`。
 
 仓库目录必须为本应用目录，不能把上级私人工作目录初始化进仓库。仓库 Actions Variables 配置三个 `VITE_SUPABASE_*` 公开变量；Pages Source 选择 GitHub Actions。
 
-工作流模板在 `deployment/pages-workflow.yml`。GitHub 凭据获得 workflow 权限后，将模板移到 `.github/workflows/pages.yml` 并推送，以激活自动部署。工作流执行锁定依赖安装、测试、正式构建、公开文件扫描和 Pages 部署。项目站点 base 为 `/personal-content-planner/`，路由使用 hash，刷新无需服务器改写。改变仓库名时同步 base、OAuth homepage 和 Supabase 回跳白名单。
+自动部署已在 `.github/workflows/pages.yml` 启用；推送 main 后执行检查与发布。若命令行凭据没有 workflow 权限，工作流文件可通过已有 GitHub 网页登录维护，无需扩大命令行授权。工作流执行锁定依赖安装、测试、正式构建、公开文件扫描和 Pages 部署。项目站点 base 为 `/personal-content-planner/`，路由使用 hash，刷新无需服务器改写。改变仓库名时同步 base、OAuth homepage 和 Supabase 回跳白名单。
 
 发布前运行 `npm run check` 并检查暂存文件、仓库历史、产物、Actions 日志与附件。扫描器是辅助检查，不能代替人工核对公开范围。发布后匿名检查实际站点和静态资源，登录前不得显示私人内容。
 
