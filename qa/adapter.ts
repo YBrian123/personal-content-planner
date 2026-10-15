@@ -8,9 +8,10 @@ import type {Session,AuthChangeEvent} from '@supabase/supabase-js';
 import type {Backup,Context,Filter,ListResult,Mutation,Row} from '../src/domain';
 const uid='11111111-1111-4111-8111-111111111111';
 export const instance='qa-isolated',configurationError='';
+document.querySelectorAll('.qa-banner').forEach(n=>n.remove());
 const banner=document.createElement('div');banner.className='qa-banner';banner.textContent='开发验收环境 · 独立临时数据 · 不连接云端';document.body.prepend(banner);
 let failNext='';
-for(const [text,kind] of [['下次提交前断开','before'],['下次提交后丢响应','after']]){const button=document.createElement('button');button.textContent=text;button.onclick=()=>{failNext=kind;button.textContent='已安排故障';setTimeout(()=>button.textContent=text,2000);};banner.append(button);}
+for(const [text,kind] of [['下次提交前断开','before'],['下次提交后丢响应','after'],['下次延迟回复 8 秒','delay']]){const button=document.createElement('button');button.textContent=text;button.onclick=()=>{failNext=kind;button.textContent='已安排故障';setTimeout(()=>button.textContent=text,2000);};banner.append(button);}
 const database=new PGlite();
 const ready=(async()=>{
   await database.exec("create role anon;create role authenticated;create schema auth;create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;grant usage on schema auth to authenticated;grant execute on function auth.uid() to authenticated;");
@@ -39,7 +40,7 @@ export const api={
   list:(plan:string,filter:Filter,offset=0,limit=50)=>rpc<ListResult>('planner_list',[plan,JSON.stringify(filter),offset,limit]),
   detail:(id:string,offset=0)=>rpc<{record:Row|null;related:Row[];historyTotal:number}>('planner_detail',[id,offset]),
   export:()=>rpc<Backup>('planner_export'),
-  execute:async(m:Mutation)=>{const failure=m.action==='daily_snapshot'?'':failNext;if(m.action!=='daily_snapshot')failNext='';if(failure==='before')throw new Error('network: 请求尚未提交');const result=await rpc<{id:string|null;generation:string;revision:number}>('planner_execute',[m.operation,m.generation,m.action,JSON.stringify(m.payload),m.expected]);if(failure==='after')throw new Error('network: 提交后响应丢失');return result;}
+  execute:async(m:Mutation)=>{const failure=m.action==='daily_snapshot'?'':failNext;if(m.action!=='daily_snapshot')failNext='';if(failure==='before')throw new Error('network: 请求尚未提交');const result=await rpc<{id:string|null;generation:string;revision:number}>('planner_execute',[m.operation,m.generation,m.action,JSON.stringify(m.payload),m.expected]);if(failure==='delay')await new Promise(resolve=>setTimeout(resolve,8000));if(failure==='after')throw new Error('network: 提交后响应丢失');return result;}
 };
 
 type Result={data:unknown;error:unknown};
