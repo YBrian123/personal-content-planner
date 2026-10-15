@@ -43,7 +43,7 @@ Mac 双击 `启动网站.command`，浏览器打开 `http://127.0.0.1:18765/`。
 
 ## Supabase 初始化
 
-在空项目依次执行 `supabase/migrations/001_planner.sql`、`002_workflow_hardening.sql`、`003_time_and_closure_integrity.sql`。迁移需要管理员入口；应用客户端不能执行管理操作。
+在空项目按文件名顺序执行 `supabase/migrations/` 中全部迁移：001、002、003，以及 `20261015140245_scope_singleton_updates.sql`。最后一份为控制行更新增加明确的本人和单例条件，兼容云端更新保护。迁移需要管理员入口；应用客户端不能执行管理操作。
 
 启用 GitHub OAuth。OAuth 应用的 callback 使用该 Supabase 项目的 `/auth/v1/callback`；Supabase Site URL 为正式 Pages 地址，Redirect URLs 精确加入本机地址及 Pages 子目录地址。OAuth Client Secret 只填写到 Supabase 后台。
 

@@ -9,3 +9,4 @@ coverage/
 .DS_Store
 *.tsbuildinfo
 dist-local/
+supabase/.temp/
