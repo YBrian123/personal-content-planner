@@ -17,7 +17,7 @@ Mac 双击 `启动网站.command`，浏览器打开 `http://127.0.0.1:18765/`。
 
 重复启动会复用已核对身份的本应用。端口被占用时提示并停止启动；停止脚本核对 PID、命令路径和健康标记后才结束进程，不会主动关闭同端口其他服务。可运行 `node scripts/local.mjs status` 检查状态，日志在忽略的 `.runtime/server.log`。
 
-开发使用 `npm run dev`。独立页面验收使用 `npm run qa`，地址 `http://127.0.0.1:18766/`。验收模式用临时 PostgreSQL 引擎和通用测试事项，刷新会重建；不能用它保存个人计划，也不能证明 Supabase 登录已经通过。Vite 拒绝构建验收模式，正式构建不包含验收适配器。
+开发使用 `npm run dev`。独立页面验收使用 `npm run qa`，地址 `http://127.0.0.1:18766/`。验收模式用临时 PostgreSQL 引擎和通用测试事项，默认刷新会重建；可通过仅允许回环地址的 `VITE_QA_BACKEND` 连接本机隔离 PostgreSQL 做多窗口回归。不能用它保存个人计划，也不能证明 Supabase 登录已经通过。Vite 拒绝构建验收模式，正式构建不包含验收适配器。
 
 ## 日常使用
 
@@ -43,7 +43,7 @@ Mac 双击 `启动网站.command`，浏览器打开 `http://127.0.0.1:18765/`。
 
 ## Supabase 初始化
 
-在空项目按文件名顺序执行 `supabase/migrations/` 中全部迁移：001、002、003，以及 `20261015140245_scope_singleton_updates.sql`。最后一份为控制行更新增加明确的本人和单例条件，兼容云端更新保护。迁移需要管理员入口；应用客户端不能执行管理操作。
+在空项目按文件名顺序执行 `supabase/migrations/` 中全部迁移：001、002、003、`20261015140245_scope_singleton_updates.sql` 和 `20261016132930_validate_backup_shapes.sql`。第 4 份为控制行更新增加明确的本人和单例条件，兼容云端更新保护；第 5 份校验引用和范围快照的嵌套结构、重复 UUID 与导入修订号，并切换数据代次。升级后旧页面需刷新。迁移需要管理员入口；应用客户端不能执行管理操作。
 
 启用 GitHub OAuth。OAuth 应用的 callback 使用该 Supabase 项目的 `/auth/v1/callback`；Supabase Site URL 为正式 Pages 地址，Redirect URLs 精确加入本机地址及 Pages 子目录地址。OAuth Client Secret 只填写到 Supabase 后台。
 

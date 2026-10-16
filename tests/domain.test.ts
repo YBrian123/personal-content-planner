@@ -42,3 +42,18 @@ it('error messages keep specific date ordering and CSV cells stay literal',async
   expect(csv([{id:'x',kind:'item',parent_id:null,revision:1,created_at:'',updated_at:'',data:{...emptyItem(),title:'=1+1,"换行\n内容"'}}])).toContain('"\'=1+1,""换行\n内容"""');
   expect(matchesView({...emptyItem(),planEnd:'2026-01-01'},'overdue',false,'2026-01-02')).toBe(true);
 });
+
+it('backup preview rejects broken row structures, references and duplicate UUID spellings',async()=>{
+  const id='abcdefab-1234-4234-8234-abcdefabcdef';
+  const row={id,kind:'item',parent_id:null,data:{...emptyItem(),title:'导入事项'},revision:1};
+  const pack=async(records:unknown[])=>{const payload=JSON.stringify({schemaVersion:1,records});return {format:'personal-planner',payload,checksum:await checksum(payload),count:records.length,exportedAt:'2026-10-16T00:00:00Z'};};
+  for(const records of [[null],[{...row,data:null}],[{...row,id:'bad'}],[{...row,data:{...row.data,links:[null]}}],[{...row,revision:0}]])
+    await expect(validateBackup(await pack(records))).rejects.toThrow();
+  await expect(validateBackup(await pack([row,{...row,id:id.toUpperCase()}]))).rejects.toThrow('重复编号');
+  expect((await validateBackup(await pack([row]))).rows).toHaveLength(1);
+});
+
+it('oversized backup preview is refused before attempting an import',async()=>{
+  const payload=JSON.stringify({schemaVersion:1,records:[]});
+  await expect(validateBackup({format:'personal-planner',payload,checksum:await checksum(payload),count:0,padding:'x'.repeat(16777216)})).rejects.toThrow('BACKUP_CAPACITY');
+});

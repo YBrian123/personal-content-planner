@@ -20,8 +20,8 @@ export default function App(){
   const [resources,setResources]=useState<Row[]>([]),[closures,setClosures]=useState<Row[]>([]),[snapshots,setSnapshots]=useState<Row[]>([]),[showArchived,setShowArchived]=useState(false);
   useEffect(()=>cancelDialog(),[session?.user.id,ctx?.generation,cancelDialog]);
   const epoch=useRef(0),sessionRef=useRef(session),planRef=useRef(plan),readSequence=useRef(0),detailSequence=useRef(0);
-  const selectedId=useRef<string|null>(null),writeInFlight=useRef<string|null>(null);
-  function setSelected(value:Row<Item>|'new'|null){selectedId.current=value==='new'?'new':value?.id||null;setSelectedState(value);}
+  const selectedId=useRef<string|null>(null),editorSequence=useRef(0),contextSequence=useRef(0),importSequence=useRef(0),writeInFlight=useRef<string|null>(null);
+  function setSelected(value:Row<Item>|'new'|null){const id=value==='new'?'new':value?.id||null;if(id!==selectedId.current)editorSequence.current++;selectedId.current=id;setSelectedState(value);}
   const dirty=useRef(false),inputFile=useRef<HTMLInputElement>(null);
   sessionRef.current=session;planRef.current=plan;
   useEffect(()=>{
@@ -33,13 +33,13 @@ export default function App(){
       setSession(s);
     });
     const hash=()=>setPage(location.hash.slice(1)||'plan');window.addEventListener('hashchange',hash);
-    const lock=(event:Event)=>{epoch.current++;setCtx(null);setList(null);setSelected(null);setResources([]);setClosures([]);setSnapshots([]);setBackup(null);setBusy(false);dirty.current=false;if((event as CustomEvent).detail==='expired'){sessionRef.current=null;setSession(null);}};
+    const lock=(event:Event)=>{epoch.current++;setCtx(null);setList(null);setSelected(null);setResources([]);setClosures([]);setSnapshots([]);setBackup(null);setBackupRevision(null);setPending(null);setNotice('');setBusy(false);dirty.current=false;if((event as CustomEvent).detail==='expired'){sessionRef.current=null;setSession(null);}};
     window.addEventListener('planner-auth-invalid',lock);
     return()=>{alive=false;sub?.data.subscription.unsubscribe();window.removeEventListener('hashchange',hash);window.removeEventListener('planner-auth-invalid',lock);};
   },[]);
   const loadContext=useCallback(async()=>{
-    const token=epoch.current,user=sessionRef.current?.user.id;if(!user)return;
-    const result=await api.context();if(token!==epoch.current||sessionRef.current?.user.id!==user)return;
+    const token=epoch.current,user=sessionRef.current?.user.id,sequence=++contextSequence.current;if(!user)return;
+    const result=await api.context();if(token!==epoch.current||sequence!==contextSequence.current||sessionRef.current?.user.id!==user)return;
     if(result.schemaVersion!==1)throw new Error('SCHEMA_MISMATCH');
     setCtx(result);
     if(!planRef.current||!result.records.some(x=>x.id===planRef.current)){
@@ -132,7 +132,7 @@ export default function App(){
     await perform(mutation(ctx,'create',{kind,data:{name:name.trim(),archived:false},...(kind==='plan'?{parent_id:parent}:{})}));
   }
   async function exportBackup(){
-    const token=epoch.current;try{const b=await api.export();if(token!==epoch.current)return;download('我的内容规划-'+chinaDate()+'.json',JSON.stringify(b,null,2),'application/json');preference('planner:last-export:'+instance, new Date().toISOString());setNotice('备份已生成并触发下载。请确认文件落盘并妥善保存。');}catch(e){setError(errorText(e));}
+    const token=epoch.current;try{const b=await api.export();if(token!==epoch.current)return;download('我的内容规划-'+chinaDate()+'.json',JSON.stringify(b),'application/json');preference('planner:last-export:'+instance, new Date().toISOString());setNotice('备份已生成并触发下载。请确认文件落盘并妥善保存。');}catch(e){if(token===epoch.current)setError(errorText(e));}
   }
   async function exportCsv(){
     const token=epoch.current;try{
@@ -141,10 +141,11 @@ export default function App(){
         const d=r.data;return !!d.trashed===(page==='recycle')&&(!filter.batch||d.batch===filter.batch)&&(!filter.platform||d.platform===filter.platform)&&(!filter.group||d.group===filter.group)&&(!filter.status||d.status===filter.status)&&matchesView(d,filter.view,!!ctx?.records.find(p=>p.id===plan)?.data.reviewEnabled)&&(!filter.q||[d.title,d.sourceCode,d.notes].join(' ').toLowerCase().includes(filter.q.toLowerCase()));
       }).map(r=>({...r,data:{...r.data,effortMinutes:b.rows.some(e=>e.kind==='effort'&&e.parent_id===r.id&&!e.data.voided)?b.rows.filter(e=>e.kind==='effort'&&e.parent_id===r.id&&!e.data.voided).reduce((s,e)=>s+Number(e.data.minutes),0):undefined}}));
       download('计划表-'+chinaDate()+'.csv',csv(items),'text/csv;charset=utf-8');setNotice('已导出全部 '+items.length+' 条匹配事项');
-    }catch(e){setError(errorText(e));}
+    }catch(e){if(token===epoch.current)setError(errorText(e));}
   }
   async function importFile(file:File){
-    const token=epoch.current;try{const parsed=await validateBackup(JSON.parse(await file.text()));const current=await api.export();const existing=new Set((await validateBackup(current)).rows.map(r=>r.id));if(token!==epoch.current)return;setBackup({...parsed,added:parsed.rows.filter(r=>!existing.has(r.id)).length,repeated:parsed.rows.filter(r=>existing.has(r.id)).length});setBackupRevision(current.revision??ctx?.revision??null);}catch(e){setError(errorText(e));}
+    const token=epoch.current,sequence=++importSequence.current;setBackup(null);setBackupRevision(null);setError('');setNotice('');
+    try{if(file.size>16777216)throw new Error('BACKUP_CAPACITY');const parsed=await validateBackup(JSON.parse(await file.text()));if(token!==epoch.current||sequence!==importSequence.current)return;const current=await api.export();const existing=new Set((await validateBackup(current)).rows.map(r=>r.id));if(token!==epoch.current||sequence!==importSequence.current)return;setBackup({...parsed,added:parsed.rows.filter(r=>!existing.has(r.id)).length,repeated:parsed.rows.filter(r=>existing.has(r.id)).length});setBackupRevision(current.revision??ctx?.revision??null);}catch(e){if(token===epoch.current&&sequence===importSequence.current)setError(errorText(e));}
   }
   async function restore(action:'restore'|'merge'){
     if(!ctx||!backup||backupRevision===null)return;
@@ -168,6 +169,7 @@ export default function App(){
   const backupDue=!lastExport||Date.now()-Date.parse(lastExport)>7*86400000;
   useEffect(()=>{document.title=siteTitle;},[siteTitle]);
   const scopeName=filter.batch||label(currentPlan||{data:{name:'当前计划'}});
+  const renderedEditor=editorSequence.current;
   return <div className="shell">
     <aside className="sidebar"><div className="brand"><span className="brand-icon">✓</span><div><strong>{siteTitle}</strong><small>把想法，慢慢做成作品</small></div></div>
       <nav>{Object.entries(pageName).map(([key,name])=><button key={key} className={page===key?'nav-active':''} onClick={()=>navigate(key)}><span>{({plan:'▤',resources:'▧',archive:'▱',recycle:'↶',settings:'⚙'} as Record<string,string>)[key]}</span>{name}</button>)}</nav>
@@ -220,15 +222,17 @@ export default function App(){
           {backup&&<div className="import-preview"><strong>校验通过 · {backup.rows.length} 条记录</strong><p>事项 {backup.rows.filter(r=>r.kind==='item').length} 条；备份时间 {dateTime(backup.backup.exportedAt)}</p>{backup.added!==undefined&&<p>新增 {backup.added} 条，同编号 {backup.repeated} 条。合并保留当前同编号内容。</p>}<p>预览使用当前修订 {backupRevision}；内容变化后需要重新预览。</p><button disabled={busy} onClick={()=>restore('merge')}>合并导入</button><button className="danger" disabled={busy} onClick={()=>restore('restore')}>完整恢复</button></div>}</article>
           <article className="info-card"><h2>当前连接</h2><p className="mono">{instance}</p><p>数据结构版本 {ctx.schemaVersion} · 修订 {ctx.revision}</p><p className="muted">本机和线上使用同一数据库。临时草稿只在当前浏览器入口可找回。</p></article>
           <article className="info-card"><h2>应用快照</h2><p>用于找回误操作，和正式数据保存在同一服务中。独立 JSON 请另外保存。</p>{snapshots.map(s=><div className="snapshot" key={s.id}><span>{dateTime(s.created_at)} · {String(s.data.reason)}<small>{(Number(s.data.bytes)/1024).toFixed(1)} KB</small></span><button disabled={busy} onClick={async()=>{
-            const token=epoch.current;const {data,error:e}=await client!.from('planner_snapshots').select('payload').eq('id',s.id).single();if(e){setError(errorText(e));return;}if(token!==epoch.current)return;
-            const payload=JSON.stringify(data.payload);const b:Backup={format:'personal-planner',payload,checksum:await checksum(payload),exportedAt:s.created_at,count:data.payload.records.length};setBackup(await validateBackup(b));setBackupRevision(ctx.revision);setNotice('快照已加载到恢复预览，请在上方核对。');
+            const token=epoch.current,sequence=++importSequence.current;setBackup(null);setBackupRevision(null);setError('');setNotice('');
+            try{const {data,error:e}=await client!.from('planner_snapshots').select('payload').eq('id',s.id).single();if(token!==epoch.current||sequence!==importSequence.current)return;if(e)throw e;
+              const payload=JSON.stringify(data.payload);const b:Backup={format:'personal-planner',payload,checksum:await checksum(payload),exportedAt:s.created_at,count:data.payload.records.length};const preview=await validateBackup(b);if(token!==epoch.current||sequence!==importSequence.current)return;setBackup(preview);setBackupRevision(ctx.revision);setNotice('快照已加载到恢复预览，请在上方核对。');
+            }catch(e){if(token===epoch.current&&sequence===importSequence.current)setError(errorText(e));}
           }}>预览恢复</button></div>)}</article></div></>}
       </>}
       </div>
     </main>
     {selected&&ctx&&session&&<Editor key={selected==='new'?'new':selected.id} row={selected==='new'?null:selected} planId={plan} plans={plans} context={ctx} user={session.user.id} busy={busy}
       onDirty={v=>{dirty.current=v;}} onError={setError} onClose={async()=>{if(dirty.current&&!await confirm('未保存输入会留在草稿，确定关闭？'))return;dirty.current=false;setSelected(null);}}
-      perform={perform} onAction={stateAction} onSaved={()=>{dirty.current=false;setSelected(null);}}/>}
+      perform={perform} onAction={stateAction} onSaved={()=>{if(renderedEditor!==editorSequence.current)return;dirty.current=false;setSelected(null);}}/>}
   </div>;
 }
 
@@ -237,6 +241,23 @@ function Editor({row,planId,plans,context,user,busy,onDirty,onError,onClose,perf
   const [values,setValues]=useState<Item>(()=>({...emptyItem(String(plans.find(p=>p.id===planId)?.data.defaultCriteria||'')),...row?.data}));
   const [available,setAvailable]=useState<Draft[]>([]),[related,setRelated]=useState<Row[]>([]),[historyTotal,setHistoryTotal]=useState(0),[minutes,setMinutes]=useState(''),[note,setNote]=useState(''),[linkInput,setLinkInput]=useState('');
   const editor=useRef(crypto.randomUUID()),version=useRef(0),latest=useRef(values),dirty=useRef(false),changed=useRef(new Set<keyof Item>()),generation=useRef(context.generation),itemId=row?.id||'new:'+planId;
+  const mounted=useRef(false),panel=useRef<HTMLElement>(null),closeEditor=useRef(onClose);
+  closeEditor.current=onClose;
+  useEffect(()=>{
+    mounted.current=true;const previous=document.activeElement as HTMLElement|null;
+    panel.current?.querySelector<HTMLInputElement>('input')?.focus();
+    const keyboard=(e:KeyboardEvent)=>{
+      if(document.querySelector('dialog[open]'))return;
+      if(e.key==='Escape'){e.preventDefault();closeEditor.current();return;}
+      if(e.key!=='Tab'||!panel.current)return;
+      const nodes=[...panel.current.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary,a[href]')].filter(n=>n.getClientRects().length>0);
+      const first=nodes[0],last=nodes.at(-1);if(!first||!last)return;
+      if(e.shiftKey&&(document.activeElement===first||!panel.current.contains(document.activeElement))){e.preventDefault();last.focus();}
+      else if(!e.shiftKey&&(document.activeElement===last||!panel.current.contains(document.activeElement))){e.preventDefault();first.focus();}
+    };
+    document.addEventListener('keydown',keyboard);
+    return()=>{mounted.current=false;document.removeEventListener('keydown',keyboard);if(previous?.isConnected)previous.focus();};
+  },[]);
   const key=[instance,user,itemId,editor.current].join(':');latest.current=values;
   const revision=row?.revision||0;
   useEffect(()=>{let alive=true;drafts.find(user,instance,itemId).then(ds=>{if(alive)setAvailable(ds.filter(d=>d.editor!==editor.current));}).catch(e=>onError(errorText(e)));
@@ -250,7 +271,7 @@ function Editor({row,planId,plans,context,user,busy,onDirty,onError,onClose,perf
     const submittedVersion=version.current,v={...latest.current};if(!v.title.trim()){onError('请填写事项标题');return;}
     const {status:_,beforeDone:__,trashed:___,...changes}=v as Item & {beforeDone?:string};
     const m=mutation(context,row?'edit':'create',row?{id:row.id,changes}:{kind:'item',parent_id:planId,data:v},row?.revision??null);
-    if(await perform(m)){await drafts.clearVersion(key,submittedVersion).catch(e=>onError(errorText(e)));if(version.current===submittedVersion){dirty.current=false;onDirty(false);onSaved();}else{if(row)await onAction(row,'refresh');onError('提交内容已保存，随后输入的内容仍未保存。');}}
+    if(await perform(m)){await drafts.clearVersion(key,submittedVersion).catch(e=>{if(mounted.current)onError(errorText(e));});if(!mounted.current)return;if(version.current===submittedVersion){dirty.current=false;onDirty(false);onSaved();}else{if(row)await onAction(row,'refresh');onError('提交内容已保存，随后输入的内容仍未保存。');}}
   }
   const textField=(field:keyof Item,label:string,textarea=false)=> <label>{label}{textarea?<textarea value={String(values[field]??'')} onChange={e=>update(field,e.target.value as never)} rows={field==='outline'?5:3}/>:<input value={String(values[field]??'')} onChange={e=>update(field,e.target.value as never)}/>}</label>;
   function precisionField(field:'actualStart'|'actualFinish',precision:'startPrecision'|'finishPrecision',title:string){
@@ -258,8 +279,8 @@ function Editor({row,planId,plans,context,user,busy,onDirty,onError,onClose,perf
     return <label>{title}<div className="precision"><select aria-label={title+'精度'} value={values[precision]} onChange={e=>{const p=e.target.value as 'date'|'minute';update(precision,p);update(field,'');}}><option value="minute">具体时分（中国时区）</option><option value="date">仅记得日期</option></select>
       <input aria-label={title+'时间'} type={values[precision]==='date'?'date':'datetime-local'} value={values[precision]==='minute'&&raw?new Date(Date.parse(raw)+8*3600000).toISOString().slice(0,16):value} onChange={e=>update(field,e.target.value?(values[precision]==='date'?e.target.value:new Date(e.target.value+':00+08:00').toISOString()):'')}/></div></label>;
   }
-  return <div className="drawer-shade"><section className="drawer" role="dialog" aria-modal="true" aria-label="事项详情"><header><div><small>{row?values.sourceCode||'计划事项':'记下一个新想法'}</small><h2>{row?'事项详情':'新增事项'}</h2></div><button aria-label="关闭详情" onClick={onClose}>×</button></header>
-    <fieldset className="drawer-body" disabled={busy&&!row}>{available.length>0&&<div className="draft-banner"><strong>找到了未保存草稿</strong>{available.map(d=><div key={d.key}><span>{dateTime(d.updatedAt)}{d.generation!==context.generation||d.revision!==revision?' · 基于旧数据，请核对':''}</span><button onClick={async()=>{if(!await confirm('将草稿放入表单供核对，尚未提交到正式数据。继续？'))return;const v={...emptyItem(),...d.values} as Item;setValues(v);latest.current=v;Object.keys(v).forEach(k=>changed.current.add(k));version.current++;dirty.current=true;onDirty(true);setAvailable([]);void persist(v);}}>放入表单核对</button></div>)}</div>}
+  return <div className="drawer-shade"><section ref={panel} className="drawer" role="dialog" aria-modal="true" aria-label="事项详情"><header><div><small>{row?values.sourceCode||'计划事项':'记下一个新想法'}</small><h2>{row?'事项详情':'新增事项'}</h2></div><button aria-label="关闭详情" onClick={onClose}>×</button></header>
+    <fieldset className="drawer-body" disabled={busy&&!row}>{available.length>0&&<div className="draft-banner"><strong>找到了未保存草稿</strong>{available.map(d=><div key={d.key}><span>{dateTime(d.updatedAt)}{d.generation!==context.generation||d.revision!==revision?' · 基于旧数据，请核对':''}</span><button onClick={async()=>{if(!await confirm('将草稿放入表单供核对，尚未提交到正式数据。继续？'))return;const v={...emptyItem(),...d.values} as Item;setValues(v);latest.current=v;Object.keys(v).forEach(k=>changed.current.add(k));version.current++;dirty.current=true;onDirty(true);setAvailable([]);void persist(v).catch(e=>onError(errorText(e)));}}>放入表单核对</button></div>)}</div>}
       {textField('title','标题')}
       <div className="two-columns"><label>平台<select value={values.platform} onChange={e=>update('platform',e.target.value)}>{['公众号','视频','小红书','其他'].map(v=><option key={v}>{v}</option>)}</select></label>
       <label>事项类型<select value={values.type} onChange={e=>update('type',e.target.value as Item['type'])}><option value="content">内容交付</option><option value="support">辅助工作</option></select></label></div>

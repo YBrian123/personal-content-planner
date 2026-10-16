@@ -1,7 +1,7 @@
 import {beforeAll,afterAll,it,expect} from 'vitest';
 import {PGlite} from '@electric-sql/pglite';
 import {readFile,readdir} from 'node:fs/promises';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import type {Backup,Context,Row,Item,ListResult} from '../src/domain';
 let db:PGlite; let ctx:Context; let plan:string; let item:Row<Item>;
 const owner='11111111-1111-4111-8111-111111111111', other='22222222-2222-4222-8222-222222222222';
@@ -111,7 +111,10 @@ it('more than 1000 rows remain fully searchable, countable and exportable',async
   const first=await fn<ListResult>('planner_list',[plan,'{}',0,200]);expect(first.matched).toBe(1101);
   const last=await fn<ListResult>('planner_list',[plan,'{}',1000,200]);expect(last.records).toHaveLength(101);
   const search=await fn<ListResult>('planner_list',[plan,JSON.stringify({q:'末页目标'}),0,50]);expect(search.matched).toBe(1);expect(search.totals.effective).toBe(1101);
-  expect(JSON.parse((await fn<Backup>('planner_export')).payload).records.filter((r:Row)=>r.kind==='item')).toHaveLength(1101);
+  const ids:string[]=[];for(let offset=0;offset<1101;offset+=200){const page=await fn<ListResult>('planner_list',[plan,'{}',offset,200]);ids.push(...page.records.map(r=>r.id));}
+  expect(ids).toHaveLength(1101);expect(new Set(ids).size).toBe(1101);
+  const exported=JSON.parse((await fn<Backup>('planner_export')).payload).records.filter((r:Row)=>r.kind==='item');
+  expect(exported).toHaveLength(1101);expect(new Set(exported.map((r:Row)=>r.id))).toEqual(new Set(ids));
 });
 it('scope baseline survives added, cancelled and removed items',async()=>{
   const direction=ctx.records.find(r=>r.kind==='direction')!;
@@ -183,3 +186,23 @@ it('oversized pre-operation snapshot stops the mutation and leaves revision and 
   expect((await fn<Context>('planner_context')).revision).toBe(revision);expect((await fn<{record:Row<Item>}>('planner_detail',[item.id])).record).toEqual(before.record);
   await db.exec('reset role');await db.query('delete from public.planner_records where id=$1',[padding]);await db.exec('set role authenticated');
 },30000);
+
+it('malformed nested references cannot crash an editor or partially change an item',async()=>{
+  const current=(await fn<{record:Row<Item>}>('planner_detail',[item.id])).record;
+  const before=await fn<Backup>('planner_export');
+  for(const links of [[null],[{label:{bad:true},url:'https://example.com'}],[{label:'引用',url:null}],[{label:'引用',onclick:'bad'}]])
+    await expect(exec('edit',{id:item.id,changes:{links}},current.revision)).rejects.toThrow('INVALID_LINKS');
+  expect((await fn<Backup>('planner_export')).payload).toBe(before.payload);
+});
+
+it('damaged scope snapshots, duplicate UUID spellings and invalid row revisions roll back restores',async()=>{
+  const original=await fn<Backup>('planner_export');
+  const rows=JSON.parse(original.payload).records as Row[];
+  const pack=(records:Row[])=>{const payload=JSON.stringify({schemaVersion:1,records});return {...original,payload,count:records.length,checksum:createHash('sha256').update(payload).digest('hex')};};
+  const malformed:Row={id:randomUUID(),kind:'settings',parent_id:plan,data:{name:'baseline:plan',value:{members:[{id:'invalid'}]}},revision:1,created_at:'2026-10-16T00:00:00Z',updated_at:'2026-10-16T00:00:00Z'};
+  await expect(exec('restore',{backup:pack([...rows,malformed])},ctx.revision)).rejects.toThrow('INVALID_BASELINE');
+  const existing=rows.find(r=>r.kind==='item')!;
+  await expect(exec('restore',{backup:pack([...rows,{...existing,id:existing.id.toUpperCase()}])},ctx.revision)).rejects.toThrow('DUPLICATE_ID');
+  await expect(exec('restore',{backup:pack(rows.map(r=>r.id===existing.id?{...r,revision:-1}:r))},ctx.revision)).rejects.toThrow('INVALID_MANIFEST');
+  expect((await fn<Backup>('planner_export')).payload).toBe(original.payload);
+});

@@ -64,11 +64,27 @@ export async function checksum(payload: string): Promise<string> { return [...ne
 export async function validateBackup(value: unknown): Promise<{backup: Backup; rows: Row[]}> {
   const b=value as Backup;
   if(!b||b.format!=='personal-planner'||typeof b.payload!=='string'||typeof b.checksum!=='string') throw new Error('备份格式不正确');
+  if(new TextEncoder().encode(JSON.stringify(b)).byteLength>16777216)throw new Error('BACKUP_CAPACITY');
   if(await checksum(b.payload)!==b.checksum) throw new Error('备份校验失败，文件可能不完整');
   const bundle=JSON.parse(b.payload) as {schemaVersion:number;records:Row[]};
-  if(bundle.schemaVersion!==1||!Array.isArray(bundle.records)) throw new Error('不支持的数据版本');
+  if(!bundle||bundle.schemaVersion!==1||!Array.isArray(bundle.records)) throw new Error('不支持的数据版本');
   if(typeof b.count!=='number'||b.count!==bundle.records.length)throw new Error('备份记录数量不匹配');
-  if(new Set(bundle.records.map(r=>r.id)).size!==bundle.records.length) throw new Error('备份包含重复编号');
+  const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
+  const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+  for(const r of bundle.records){
+    if(!object(r)||!uuid(r.id)||!['direction','plan','item','effort','event','closure','reference','settings'].includes(String(r.kind))||!object(r.data)||(r.parent_id!==null&&r.parent_id!==undefined&&!uuid(r.parent_id)))throw new Error('备份记录结构不正确');
+    if(r.revision!==undefined&&(!Number.isSafeInteger(r.revision)||r.revision<1))throw new Error('备份修订号不正确');
+    const d=r.data;
+    if(r.kind==='item'){
+      if(typeof d.title!=='string'||!d.title.trim())throw new Error('备份事项缺少标题');
+      if(d.links!==undefined&&(!Array.isArray(d.links)||d.links.some(l=>!object(l)||typeof l.label!=='string'||['url','path'].some(k=>l[k]!==undefined&&typeof l[k]!=='string'))))throw new Error('INVALID_LINKS');
+      if(d.related!==undefined&&(!Array.isArray(d.related)||!d.related.every(uuid)))throw new Error('INVALID_RELATED_ITEM');
+    }
+    if(r.kind==='settings'&&String(d.name).startsWith('baseline:')){
+      if(!object(d.value)||!Array.isArray(d.value.members)||d.value.members.some(m=>!object(m)||!uuid(m.id)))throw new Error('INVALID_BASELINE');
+    }
+  }
+  if(new Set(bundle.records.map(r=>r.id.toLowerCase())).size!==bundle.records.length) throw new Error('备份包含重复编号');
   return {backup:b, rows:bundle.records};
 }
 
