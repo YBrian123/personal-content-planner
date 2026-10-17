@@ -6,6 +6,7 @@ import initial from '../supabase/migrations/001_planner.sql?raw';
 import hardening from '../supabase/migrations/002_workflow_hardening.sql?raw';
 import integrity from '../supabase/migrations/003_time_and_closure_integrity.sql?raw';
 import scoped from '../supabase/migrations/20261015140245_scope_singleton_updates.sql?raw';
+import hierarchy from '../supabase/migrations/20261017005007_hierarchy_and_bulk_actions.sql?raw';
 import shapes from '../supabase/migrations/20261016132930_validate_backup_shapes.sql?raw';
 import type {Session,AuthChangeEvent} from '@supabase/supabase-js';
 import type {Backup,Context,Filter,ListResult,Mutation,Row} from '../src/domain';
@@ -28,7 +29,7 @@ const database=new PGlite();
 const ready=(async()=>{
   if(backend){await remote('/health',{});return;}
   await database.exec("create role anon;create role authenticated;create schema auth;create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;grant usage on schema auth to authenticated;grant execute on function auth.uid() to authenticated;");
-  await database.exec(initial);await database.exec(hardening);await database.exec(integrity);await database.exec(scoped);await database.exec(shapes);
+  await database.exec(initial);await database.exec(hardening);await database.exec(integrity);await database.exec(scoped);await database.exec(shapes);await database.exec(hierarchy);
   await database.query('update public.planner_control set owner_id=$1',[uid]);
   await database.query("select set_config('request.jwt.claim.sub',$1,false)",[uid]);
   await database.exec('set role authenticated');

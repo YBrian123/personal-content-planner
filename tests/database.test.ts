@@ -206,3 +206,97 @@ it('damaged scope snapshots, duplicate UUID spellings and invalid row revisions 
   await expect(exec('restore',{backup:pack(rows.map(r=>r.id===existing.id?{...r,revision:-1}:r))},ctx.revision)).rejects.toThrow('INVALID_MANIFEST');
   expect((await fn<Backup>('planner_export')).payload).toBe(original.payload);
 });
+
+it('deleting a plan hides its children, blocks stale writes, and restores only that container',async()=>{
+  const direction=ctx.records.find(r=>r.kind==='direction')!;
+  let p=(await exec('create',{kind:'plan',parent_id:direction.id,data:{name:'删除计划验收'}})).record;
+  let a=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'保留历史的事项'}})).record;
+  let b=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'原本单独删除'}})).record;
+  a=(await exec('status',{id:a.id,status:'doing'},a.revision)).record;
+  b=(await exec('trash',{id:b.id},b.revision)).record;
+  const start=a.data.actualStart;
+  p=(await exec('trash',{id:p.id,scopeRevision:ctx.revision},p.revision)).record;
+  expect(ctx.overview!.find(x=>x.id===p.id)?.effective).toBe(0);
+  for(const [action,payload,revision] of [['edit',{id:a.id,changes:{notes:'旧页面'}},a.revision],['status',{id:a.id,status:'done'},a.revision],['create',{kind:'item',parent_id:p.id,data:{title:'不能写入隐藏计划'}},null]] as Array<[string,unknown,number|null]>)
+    await expect(exec(action,payload,revision)).rejects.toThrow(/TRASHED/);
+  await expect(fn('planner_list',[p.id,'{}',0,50])).rejects.toThrow('PARENT_TRASHED');
+  await expect(exec('untrash',{id:b.id},b.revision)).rejects.toThrow('PARENT_TRASHED');
+  await exec('untrash',{id:p.id},p.revision);
+  const list=await fn<ListResult>('planner_list',[p.id,'{}',0,50]);expect(list.records.map(x=>x.id)).toEqual([a.id]);expect(list.records[0].data.actualStart).toBe(start);
+  expect((await fn<ListResult>('planner_list',[p.id,JSON.stringify({trash:true}),0,50])).records[0].id).toBe(b.id);
+});
+
+it('direction deletion checks the preview revision and preserves separately deleted plans',async()=>{
+  let d=(await exec('create',{kind:'direction',data:{name:'整组删除验收'}})).record;
+  const first=ctx.records.find(p=>p.parent_id===d.id)!;
+  let second=(await exec('create',{kind:'plan',parent_id:d.id,data:{name:'先删除的计划'}})).record;
+  second=(await exec('trash',{id:second.id,scopeRevision:ctx.revision},second.revision)).record;
+  const preview=ctx.revision;
+  await exec('create',{kind:'item',parent_id:first.id,data:{title:'预览后新增'}});
+  await expect(exec('trash',{id:d.id,scopeRevision:preview},d.revision)).rejects.toThrow('RANGE_CHANGED');
+  expect(ctx.contents?.find(x=>x.id===d.id)).toMatchObject({plans:1,items:1});
+  d=(await exec('trash',{id:d.id,scopeRevision:ctx.revision},d.revision)).record;
+  await expect(exec('untrash',{id:second.id},second.revision)).rejects.toThrow('PARENT_TRASHED');
+  await exec('untrash',{id:d.id},d.revision);
+  expect(ctx.records.find(x=>x.id===first.id)?.data.trashed).not.toBe(true);
+  expect(ctx.records.find(x=>x.id===second.id)?.data.trashed).toBe(true);
+  expect(ctx.overview?.find(x=>x.id===d.id)?.effective).toBe(1);
+});
+
+it('batch completion is atomic and idempotent, preserving old completion times and unsubmitted text',async()=>{
+  const direction=ctx.records.find(r=>r.kind==='direction')!;
+  const p=(await exec('create',{kind:'plan',parent_id:direction.id,data:{name:'批量完成'}})).record;
+  let a=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'完成 A',outline:'正式大纲'}})).record;
+  let b=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'已完成 B'}})).record;
+  b=(await exec('status',{id:b.id,status:'done',occurredAt:'2026-10-15T07:00:00Z'},b.revision)).record;
+  const items=[a,b].map(({id,revision})=>({id,revision})),op=randomUUID(),g=ctx.generation;
+  const payload={plan_id:p.id,items,occurredAt:'2026-10-17T02:00:00Z'};
+  const result=await exec('batch_status',payload,null,op,g);
+  expect(await fn('planner_execute',[op,g,'batch_status',JSON.stringify(payload),null])).toEqual(result);
+  a=(await fn<{record:Row<Item>}>('planner_detail',[a.id])).record;
+  expect(a.data).toMatchObject({status:'done',actualFinish:payload.occurredAt,actualStart:'',outline:'正式大纲'});
+  expect((await fn<{record:Row<Item>}>('planner_detail',[b.id])).record.data.actualFinish).toBe('2026-10-15T07:00:00Z');
+  const history=await fn<{related:Row[]}>('planner_detail',[a.id]);expect(history.related.filter(r=>r.kind==='event'&&r.data.action==='status')).toHaveLength(1);
+  await expect(exec('batch_status',{...payload,items:[items[0]]},null,op,g)).rejects.toThrow('OPERATION_REUSED');
+});
+
+it('one stale batch member aborts every write; successful batch deletion remains recoverable',async()=>{
+  const direction=ctx.records.find(r=>r.kind==='direction')!;
+  const p=(await exec('create',{kind:'plan',parent_id:direction.id,data:{name:'批量冲突'}})).record;
+  const a=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'不能部分更新 A'}})).record;
+  let b=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'不能部分更新 B'}})).record;
+  const old=b.revision;b=(await exec('edit',{id:b.id,changes:{notes:'另一窗口已改'}},b.revision)).record;
+  const before=await fn<Backup>('planner_export');
+  for(const action of ['batch_status','batch_trash'])await expect(exec(action,{plan_id:p.id,items:[{id:a.id,revision:a.revision},{id:b.id,revision:old}]})).rejects.toThrow('CONFLICT');
+  expect((await fn<Backup>('planner_export')).payload).toBe(before.payload);
+  await exec('batch_trash',{plan_id:p.id,items:[a,b].map(({id,revision})=>({id,revision}))});
+  expect((await fn<ListResult>('planner_list',[p.id,'{}',0,50])).matched).toBe(0);
+  const trashed=await fn<ListResult>('planner_list',[p.id,JSON.stringify({trash:true}),0,50]);expect(trashed.matched).toBe(2);
+  for(const row of trashed.records)await exec('untrash',{id:row.id},row.revision);
+  expect((await fn<{record:Row<Item>}>('planner_detail',[b.id])).record.data.notes).toBe('另一窗口已改');
+  expect((await db.query("select count(*)::int n from public.planner_snapshots where reason='batch_trash'")).rows[0]).toMatchObject({n:1});
+});
+
+it('batch validation refuses mixed plans, duplicate identities and private helper calls',async()=>{
+  const candidates=ctx.records.filter(r=>r.kind==='plan');
+  const a=(await exec('create',{kind:'item',parent_id:candidates[0].id,data:{title:'批量归属 A'}})).record;
+  const b=(await exec('create',{kind:'item',parent_id:candidates[1].id,data:{title:'批量归属 B'}})).record;
+  for(const items of [[{id:a.id,revision:a.revision},{id:b.id,revision:b.revision}],[{id:a.id,revision:a.revision},{id:a.id.toUpperCase(),revision:a.revision}],[],[{id:a.id,revision:-1}],Array.from({length:201},()=>({id:a.id,revision:a.revision}))])await expect(exec('batch_status',{plan_id:a.parent_id,items})).rejects.toThrow('INVALID_SELECTION');
+  await expect(fn('planner_in_trash',[a.id])).rejects.toThrow('permission denied');
+  await expect(fn('planner_execute_record',[randomUUID(),ctx.generation,'status',JSON.stringify({id:a.id,status:'done'}),a.revision])).rejects.toThrow('permission denied');
+});
+
+it('a validation failure midway through a batch rolls back earlier item updates and events',async()=>{
+  const d=ctx.records.find(r=>r.kind==='direction')!;
+  const p=(await exec('create',{kind:'plan',parent_id:d.id,data:{name:'批次中途失败'}})).record;
+  const a=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'先处理 A'}})).record;
+  let b=(await exec('create',{kind:'item',parent_id:p.id,data:{title:'后处理 B'}})).record;
+  b=(await exec('edit',{id:b.id,changes:{actualStart:'2099-01-01T00:00:00Z',startPrecision:'minute'}},b.revision)).record;
+  const before=await fn<Backup>('planner_export');
+  await expect(exec('batch_status',{plan_id:p.id,items:[a,b].map(({id,revision})=>({id,revision})),occurredAt:'2026-10-17T00:00:00Z'})).rejects.toThrow('INVALID_TIME_ORDER');
+  expect((await fn<Backup>('planner_export')).payload).toBe(before.payload);
+});
+
+it('a missing data generation cannot bypass the public mutation guard',async()=>{
+  await expect(fn('planner_execute',[randomUUID(),null,'create',JSON.stringify({kind:'direction',data:{name:'must fail'}}),null])).rejects.toThrow('STALE_GENERATION');
+});

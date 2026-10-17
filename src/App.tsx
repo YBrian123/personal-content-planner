@@ -1,12 +1,13 @@
-import {useCallback,useEffect,useRef,useState} from 'react';
+import {lazy,Suspense,useCallback,useEffect,useRef,useState} from 'react';
 import type {Session} from '@supabase/supabase-js';
 import {api,client,configurationError,errorText,initialize,instance,login,logout,mutation,providerStatus} from './data';
 import {STATUS,chinaDate,checksum,csv,dateTime,due,duration,elapsed,emptyItem,matchesView,period,reviewDate,safeUrl,validateBackup} from './domain';
 import type {Backup,Context,Filter,Item,ListResult,Mutation,Row,Status} from './domain';
 import {drafts} from './drafts';
 import {useDialogs} from './dialogs';
+const ContentTree=lazy(()=>import('./ContentTree'));
 import type {Draft} from './drafts';
-const pageName:Record<string,string>={plan:'计划表',resources:'资料与规则',archive:'归档计划',recycle:'回收站',settings:'备份与设置'};
+const pageName:Record<string,string>={plan:'计划表',resources:'资料与规则',archive:'方向与计划',recycle:'回收站',settings:'备份与设置'};
 const label=(r:Pick<Row,'data'>)=>String(r.data.name||'未命名');
 function download(name:string,text:string,type:string){const u=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),2000);}
 function preference(key:string,value?:string):string{try{if(value!==undefined)localStorage.setItem(key,value);return localStorage.getItem(key)||'';}catch{return '';}}
@@ -18,6 +19,8 @@ export default function App(){
   const [selected,setSelectedState]=useState<Row<Item>|'new'|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[pending,setPending]=useState<Mutation|null>(null);
   const [backup,setBackup]=useState<{backup:Backup;rows:Row[];added?:number;repeated?:number}|null>(null),[backupRevision,setBackupRevision]=useState<number|null>(null);
   const [resources,setResources]=useState<Row[]>([]),[closures,setClosures]=useState<Row[]>([]),[snapshots,setSnapshots]=useState<Row[]>([]),[showArchived,setShowArchived]=useState(false);
+  const [checked,setChecked]=useState<Record<string,number>>({});
+  useEffect(()=>setChecked({}),[plan,filter,offset,page,ctx?.generation,list?.revision]);
   useEffect(()=>cancelDialog(),[session?.user.id,ctx?.generation,cancelDialog]);
   const epoch=useRef(0),sessionRef=useRef(session),planRef=useRef(plan),readSequence=useRef(0),detailSequence=useRef(0);
   const selectedId=useRef<string|null>(null),editorSequence=useRef(0),contextSequence=useRef(0),importSequence=useRef(0),writeInFlight=useRef<string|null>(null);
@@ -42,9 +45,9 @@ export default function App(){
     const result=await api.context();if(token!==epoch.current||sequence!==contextSequence.current||sessionRef.current?.user.id!==user)return;
     if(result.schemaVersion!==1)throw new Error('SCHEMA_MISMATCH');
     setCtx(result);
-    if(!planRef.current||!result.records.some(x=>x.id===planRef.current)){
+    if(!planRef.current||!result.records.some(x=>x.id===planRef.current&&!x.data.trashed&&!result.records.find(d=>d.id===x.parent_id)?.data.trashed)){
       const saved=preference('planner:'+instance+':'+user+':plan');
-      const eligible=(x:Row)=>x.kind==='plan'&&!x.data.archived&&!result.records.find(d=>d.id===x.parent_id)?.data.archived;
+      const eligible=(x:Row)=>x.kind==='plan'&&!x.data.trashed&&!x.data.archived&&!result.records.find(d=>d.id===x.parent_id)?.data.trashed&&!result.records.find(d=>d.id===x.parent_id)?.data.archived;
       const first=result.records.find(eligible);
       const choice=result.records.find(x=>x.id===saved&&eligible(x))||first;
       setPlan(choice?.id||'');
@@ -93,11 +96,12 @@ export default function App(){
       await drafts.clearVersion(requestKey,1).catch(()=>{});
       if(token!==epoch.current)return false;
       const outstanding=await drafts.find(user,instance,'pendingOperation').catch(()=>[]);setPending(outstanding.length?outstanding[0].values.request as unknown as Mutation:null);setNotice(outstanding.length?'已保存；另有上次提交等待核对。':'已保存');
-      try{const c=await loadContext();if(c&&planRef.current===plan)await loadList();}catch(e){setError('操作已保存，重新读取失败：'+errorText(e));}
+      try{const c=await loadContext();if(c&&planRef.current===plan&&c.records.some(r=>r.id===plan&&!r.data.trashed&&!c.records.find(d=>d.id===r.parent_id)?.data.trashed))await loadList();}catch(e){setError('操作已保存，重新读取失败：'+errorText(e));}
       return true;
     }catch(e){if(token!==epoch.current)return false;const message=String((e as {message?:string})?.message||e);setError(errorText(e));
       if(issued&&/fetch|network|timeout|upstream/i.test(message)){setPending(m);setNotice('结果待确认，原请求已保留在本机。');}
       else{await drafts.clearVersion(requestKey,1).catch(()=>{});setPending(null);setNotice('');}
+      if(/CONFLICT|RANGE_CHANGED|ITEM_TRASHED|PARENT_TRASHED/.test(message)){setChecked({});try{const fresh=await loadContext();if(fresh&&fresh.records.some(r=>r.id===plan&&!r.data.trashed&&!fresh.records.find(d=>d.id===r.parent_id)?.data.trashed))await loadList();}catch{}}
       if(/JWT|PGRST30[12]|FORBIDDEN/i.test(message)){epoch.current++;setCtx(null);setList(null);setSelected(null);setResources([]);setClosures([]);setSnapshots([]);setBusy(false);}
       return false;
     }finally{if(writeInFlight.current===m.operation)writeInFlight.current=null;if(token===epoch.current)setBusy(false);}
@@ -124,12 +128,32 @@ export default function App(){
     try{await drafts.clearUser(user);}catch(e){problems.push('本机草稿未清除：'+errorText(e));}
     setError(problems.join('；'));setNotice(problems.length?'页面已锁定，请核对退出提示。':'已退出，已清理本机草稿。');
   }
-  async function createGroup(kind:'direction'|'plan'){
-    if(!ctx)return;const name=await prompt(kind==='direction'?'新方向名称':'新计划名称');if(!name?.trim())return;
-    const current=ctx.records.find(r=>r.id===plan);
-    let parent=current?.parent_id;
-    if(kind==='plan'&&!parent){setError('请先建立一个方向');return;}
-    await perform(mutation(ctx,'create',{kind,data:{name:name.trim(),archived:false},...(kind==='plan'?{parent_id:parent}:{})}));
+  async function selectPlan(id:string):Promise<boolean>{
+    if(dirty.current&&!await confirm('草稿会保留，切换计划？'))return false;
+    dirty.current=false;detailSequence.current++;setSelected(null);setPlan(id);setOffset(0);
+    const p=ctx?.records.find(r=>r.id===id);let saved:Filter={sort:'rank',...(p?.data.defaultBatch?{batch:String(p.data.defaultBatch)}:{})};
+    try{const f=preference('planner:'+instance+':'+session!.user.id+':filter:'+id);if(f)saved=JSON.parse(f);}catch{}setFilter(saved);await navigate('plan');return true;
+  }
+  async function newItem(id:string){if(await selectPlan(id)){dirty.current=false;setSelected('new');}}
+  async function openTreeItem(id:string,parent:string){if(await selectPlan(parent))await openItem(id);}
+  async function createGroup(kind:'direction'|'plan',directionId?:string){
+    if(!ctx)return;const parent=kind==='plan'?ctx.records.find(r=>r.id===directionId&&r.kind==='direction'&&!r.data.trashed):null;
+    if(kind==='plan'&&!parent){setError('请在目标内容方向下点击“新建计划”。');return;}
+    const name=await prompt(kind==='direction'?'新建内容方向：名称':'在「'+label(parent!)+'」下新建计划：名称');if(!name?.trim())return;
+    await perform(mutation(ctx,'create',{kind,data:{name:name.trim(),archived:false},...(parent?{parent_id:parent.id}:{})}));
+  }
+  async function removeRecord(row:Row){
+    if(!ctx)return;const scope=ctx.contents?.find(c=>c.id===row.id),kind=row.kind==='direction'?'内容方向':row.kind==='plan'?'计划':'事项';
+    const message='删除'+kind+'「'+String(row.data.title||row.data.name)+'」？'+(row.kind==='direction'?'包含 '+(scope?.plans??0)+' 个计划、'+(scope?.items??0)+' 个事项。':row.kind==='plan'?'包含 '+(scope?.items??0)+' 个事项。':'')+'\n内容将移入回收站，时间、投入和历史保留，可恢复。';
+    const request=mutation(ctx,'trash',{id:row.id,...(row.kind==='item'?{}:{scopeRevision:ctx.revision})},row.revision);
+    if(!await confirm(message))return;
+    if(await perform(request)){setChecked({});detailSequence.current++;if(row.kind!=='item'||selectedId.current===row.id){dirty.current=false;setSelected(null);}}
+  }
+  async function batchAction(action:'batch_status'|'batch_trash'){
+    if(!ctx)return;const items=Object.entries(checked).map(([id,revision])=>({id,revision}));if(!items.length)return;
+    const request=mutation(ctx,action,{plan_id:plan,items});
+    if(!await confirm((action==='batch_status'?'将所选 '+items.length+' 个事项标记完成？已完成事项保留原完成时间。':'删除所选 '+items.length+' 个事项？记录将进入回收站，可恢复。')+'\n仅处理当前页明确选中的事项。'))return;
+    if(await perform(request))setChecked({});
   }
   async function exportBackup(){
     const token=epoch.current;try{const b=await api.export();if(token!==epoch.current)return;download('我的内容规划-'+chinaDate()+'.json',JSON.stringify(b),'application/json');preference('planner:last-export:'+instance, new Date().toISOString());setNotice('备份已生成并触发下载。请确认文件落盘并妥善保存。');}catch(e){if(token===epoch.current)setError(errorText(e));}
@@ -160,7 +184,7 @@ export default function App(){
     const note=await prompt('本轮复盘备注（可空）');if(note===null)return;
     await perform(mutation(ctx,'close_batch',{plan_id:plan,batch:filter.batch,mode,note},before.revision));
   }
-  const plans=ctx?.records.filter(r=>r.kind==='plan')||[],directions=ctx?.records.filter(r=>r.kind==='direction')||[];
+  const plans=ctx?.records.filter(r=>r.kind==='plan'&&!r.data.trashed&&!ctx.records.find(d=>d.id===r.parent_id)?.data.trashed)||[];
   const currentPlan=plans.find(r=>r.id===plan),totals=list?.totals;
   const overview=(id:string|null|undefined)=>ctx?.overview?.find(x=>x.id===id);
   const compactProgress=(id:string|null|undefined)=>{const p=overview(id);return p?p.effective?p.done+'/'+p.effective:p.total?'无有效事项':'尚无事项':'—';};
@@ -173,11 +197,7 @@ export default function App(){
   return <div className="shell">
     <aside className="sidebar"><div className="brand"><span className="brand-icon">✓</span><div><strong>{siteTitle}</strong><small>把想法，慢慢做成作品</small></div></div>
       <nav>{Object.entries(pageName).map(([key,name])=><button key={key} className={page===key?'nav-active':''} onClick={()=>navigate(key)}><span>{({plan:'▤',resources:'▧',archive:'▱',recycle:'↶',settings:'⚙'} as Record<string,string>)[key]}</span>{name}</button>)}</nav>
-      <div className="sidebar-label">内容方向 <button title="新建方向" disabled={!ctx||busy} onClick={()=>createGroup('direction')}>＋</button></div>
-      {directions.filter(d=>showArchived||!d.data.archived).map(direction=><section className="direction" key={direction.id}><div className="direction-name">{label(direction)} <small>{compactProgress(direction.id)}</small></div>
-        {plans.filter(p=>p.parent_id===direction.id&&(showArchived||!p.data.archived)).map(p=><button className={plan===p.id?'plan-active':''} key={p.id} onClick={async()=>{if(dirty.current&&!await confirm('草稿会保留，切换计划？'))return;dirty.current=false;setSelected(null);setPlan(p.id);setOffset(0);let saved:Filter={sort:'rank',...(p.data.defaultBatch?{batch:String(p.data.defaultBatch)}:{})};try{const f=preference('planner:'+instance+':'+session!.user.id+':filter:'+p.id);if(f)saved=JSON.parse(f);}catch{}setFilter(saved);navigate('plan');}}>{label(p)} <small>{compactProgress(p.id)}</small></button>)}</section>)}
-      {!directions.length&&<p className="muted sidebar-empty">连接后，在这里管理不同的内容方向。</p>}
-      <button className="subtle" disabled={!ctx} onClick={()=>createGroup('plan')}>＋ 新建计划</button>
+      <Suspense fallback={<p className="sidebar-empty">目录读取中…</p>}><ContentTree key={(session?.user.id||'anonymous')+':'+(ctx?.generation||'none')} context={ctx} plan={plan} storageKey={'planner:'+instance+':'+(session?.user.id||'anonymous')+':tree'} busy={busy} showArchived={showArchived} onPlan={id=>void selectPlan(id)} onItem={(id,parent)=>void openTreeItem(id,parent)} onNewDirection={()=>void createGroup('direction')} onNewPlan={id=>void createGroup('plan',id)} onNewItem={id=>void newItem(id)} onDelete={row=>void removeRecord(row)} onError={setError}/></Suspense>
       <label className="show-archived"><input type="checkbox" checked={showArchived} onChange={e=>setShowArchived(e.target.checked)}/>显示归档方向与计划</label>
       <div className="sidebar-footer"><i className={ctx?'online':''}/>{ctx?'已连接个人数据':'等待连接'}<small>记录、安排、完成、回看</small></div>
     </aside>
@@ -193,7 +213,9 @@ export default function App(){
         </div></div><div className="welcome-features"><span>✓ 完成有日期</span><span>✓ 历时与投入分开</span><span>✓ 备份可带走</span></div></section>:
       <>
       {page==='plan'&&backupDue&&<div className="backup-reminder">{lastExport?'距离上次触发独立备份已超过 7 天。':'还没有独立备份记录。'}<button className="link-button" onClick={exportBackup}>下载 JSON 备份</button></div>}
-      {['plan','recycle'].includes(page)&&<><div className="heading-row"><div><div className="eyebrow">{page==='recycle'?'RECYCLE BIN':'YOUR NEXT CHAPTER'}</div><h1>{page==='recycle'?'回收站':currentPlan?label(currentPlan):'先建立一份计划'}</h1><p className="muted">{page==='recycle'?'误删的事项可以恢复，时间与投入继续保留。':String(currentPlan?.data.goal||'从一件小事开始，完成后留下记录。')}</p></div><button className="primary" disabled={!plan||busy} onClick={async()=>{if(dirty.current&&!await confirm('草稿保留，新建事项？'))return;dirty.current=false;setSelected('new');}}>＋ 新增事项</button></div>
+      {['plan','recycle'].includes(page)&&<><div className="heading-row"><div><div className="eyebrow">{page==='recycle'?'RECYCLE BIN':'YOUR NEXT CHAPTER'}</div><h1>{page==='recycle'?'回收站':currentPlan?label(currentPlan):'先建立一份计划'}</h1><p className="muted">{page==='recycle'?'方向、计划和事项都可以恢复；请先恢复已删除的上层。':String(currentPlan?.data.goal||'从一件小事开始，完成后留下记录。')}</p></div>{page==='plan'&&<button className="primary" disabled={!plan||busy} onClick={()=>void newItem(plan)}>＋ 新增事项</button>}</div>
+        {page==='plan'&&currentPlan&&<div className="breadcrumbs"><span>内容方向</span><strong>{label(ctx.records.find(r=>r.id===currentPlan.parent_id)!)}</strong><i>›</i><span>计划</span><strong>{label(currentPlan)}</strong><i>›</i><span>事项</span></div>}
+        {page==='recycle'&&<><h2 className="section-heading">已删除的内容方向与计划</h2><div className="cards recycled-containers">{ctx.records.filter(r=>r.data.trashed).map(r=>{const parent=ctx.records.find(p=>p.id===r.parent_id),blocked=!!parent?.data.trashed;return <article className="info-card" key={r.id}><small>{r.kind==='direction'?'内容方向':'计划'+(parent?' · 所属方向：'+label(parent):'')}</small><h2>{label(r)}</h2><p>{blocked?'请先恢复所属内容方向。':'恢复后，其下未单独删除的内容会一同找回。'}{r.data.archived?' 原归档状态也会保留。':''}</p><button disabled={busy||blocked} onClick={()=>void perform(mutation(ctx,'untrash',{id:r.id},r.revision))}>恢复{r.kind==='direction'?'方向':'计划'}</button></article>;})}</div>{!ctx.records.some(r=>r.data.trashed)&&<p className="muted">没有单独删除的内容方向或计划。</p>}<h2 className="section-heading">单独删除的事项{currentPlan?' · '+label(currentPlan):''}</h2>{!plan&&<p className="muted">先恢复一个计划，或从左侧选择计划，再查看其中单独删除的事项。</p>}</>}
         {page==='plan'&&<><div className="scope-chips"><span>当前计划 {compactProgress(plan)}</span><span>内容方向 {compactProgress(currentPlan?.parent_id)}</span>{filter.batch&&<button className="link-button" onClick={()=>changeFilter('batch','')}>查看整个计划 →</button>}</div><div className="stats"><div className="stat progress-stat"><small>{scopeName} · 有效进度</small><strong>{totals&&totals.effective>0?<>{totals.done}<em> / {totals.effective}</em></>:'—'}</strong><div className="progress"><i style={{width:totals&&totals.effective>0?totals.done/totals.effective*100+'%':'0%'}}/></div><span>{totals?totals.total===0?'尚无事项':totals.effective===0?'无有效事项':'首次范围 '+(totals.original??totals.total)+' 项 · 新增 '+(totals.added??0)+' · 移出 '+(totals.removed??0)+' · 取消 '+totals.cancelled:'等待读取'}</span></div>
           <div className="stat"><small>已完成内容</small><strong>{totals?.content??'—'}<em> 项</em></strong><span>辅助工作完成 {totals?.support??0} 项</span></div>
           <div className="stat"><small>实际投入</small><strong className="time-stat">{totals&&totals.effortCoverage>0?duration(totals.effortMinutes):'未记录'}</strong><span>覆盖 {totals?.effortCoverage??0}/{totals?.effective??0} 项{totals?.cancelledEffort?' · 取消项另投入 '+duration(totals.cancelledEffort):''}</span></div>
@@ -205,15 +227,16 @@ export default function App(){
           <select aria-label="排序" value={filter.sort||'rank'} onChange={e=>changeFilter('sort',e.target.value)}>{[['rank','制作顺序'],['deadline','计划结束'],['finished','完成时间'],['elapsed','历时'],['priority','优先级']].map(([v,n])=><option key={v} value={v}>{n}</option>)}</select>
           <select aria-label="日常清单" value={filter.view||''} onChange={e=>changeFilter('view',e.target.value)}><option value="">全部事项</option><option value="doing">正在进行</option><option value="upcoming">未来七天</option><option value="overdue">计划日期已过</option><option value="unscheduled">未排期</option>{!!currentPlan?.data.reviewEnabled&&<option value="review">待复查</option>}</select><button onClick={async()=>{setFilter({sort:'rank'});setOffset(0);}}>清除筛选</button><button onClick={()=>loadContext().then(loadList).catch(e=>setError(errorText(e)))} disabled={busy}>刷新</button></div>
           <div className="table-meta"><span>显示 {list?.matched??0} 条 · 筛选不会改变计划进度分母</span><div><button className="link-button" disabled={busy||!plan} onClick={exportCsv}>导出计划表</button><button className="link-button" disabled={busy||!filter.batch||page!=='plan'} onClick={closeBatch}>批次结项</button></div></div>
-          <div className="table-wrap"><table><thead><tr><th>完成</th><th>事项</th><th>平台／状态</th><th>计划结束</th><th>时间记录</th><th/></tr></thead><tbody>{list?.records.map(row=><tr key={row.id}><td><input type="checkbox" aria-label={'完成 '+row.data.title} checked={row.data.status==='done'} disabled={busy||!!row.data.trashed} onChange={e=>stateAction(row,e.target.checked?'status':'undo',e.target.checked?'done':undefined)}/></td>
+          {page==='plan'&&<div className="bulk-toolbar"><label><input type="checkbox" aria-label="选择当前页全部事项" disabled={busy||!list?.records.length} checked={!!list?.records.length&&list.records.every(r=>checked[r.id]!==undefined)} onChange={e=>setChecked(e.target.checked?Object.fromEntries((list?.records||[]).map(r=>[r.id,r.revision])):{})}/>全选当前页</label><span>已选 {Object.keys(checked).length} 项</span><button disabled={busy||!Object.keys(checked).length} onClick={()=>void batchAction('batch_status')}>批量完成</button><button className="danger" disabled={busy||!Object.keys(checked).length} onClick={()=>void batchAction('batch_trash')}>批量删除</button><button className="link-button" disabled={!Object.keys(checked).length} onClick={()=>setChecked({})}>取消选择</button></div>}
+          <div className="table-wrap"><table><thead><tr><th>选择</th><th>事项</th><th>平台／状态</th><th>计划结束</th><th>时间记录</th><th>操作</th></tr></thead><tbody>{list?.records.map(row=><tr key={row.id}><td><input type="checkbox" aria-label={'选择 '+row.data.title} checked={checked[row.id]!==undefined} disabled={busy||page==='recycle'} onChange={e=>setChecked(previous=>{const next={...previous};if(e.target.checked)next[row.id]=row.revision;else delete next[row.id];return next;})}/></td>
             <td><button className="item-title" onClick={()=>openItem(row.id)}>{row.data.title}</button><div className="item-meta">{row.data.sourceCode||'自主选题'}{row.data.group?' · '+row.data.group:''}{row.data.batch?' · '+row.data.batch:''}{row.data.type==='support'?' · 辅助工作':''}</div></td>
             <td><div className="platform">{row.data.platform}</div><span className={'status '+row.data.status}>{STATUS[row.data.status]}</span></td>
             <td>{row.data.planEnd||<span className="muted">未排期</span>}<small className="due">{due(row.data)}</small></td><td><span className="time-cell">{elapsed(row.data)}</span><small className="muted">{row.data.actualFinish?'完成 '+dateTime(row.data.actualFinish):row.data.actualStart?'开始 '+dateTime(row.data.actualStart):'日期待记录'}</small></td>
-            <td>{page==='recycle'?<button disabled={busy} onClick={()=>stateAction(row,'untrash')}>恢复</button>:row.data.status==='todo'?<button className="link-button" disabled={busy} onClick={()=>stateAction(row,'status','doing')}>开始</button>:<button className="link-button" onClick={()=>openItem(row.id)}>查看 →</button>}</td></tr>)}</tbody></table></div>
+            <td><div className="row-actions">{page==='recycle'?<button disabled={busy} onClick={()=>stateAction(row,'untrash')}>恢复</button>:<>{row.data.status==='todo'&&<button className="link-button" disabled={busy} onClick={()=>stateAction(row,'status','doing')}>开始</button>}<label className="completion-action"><input type="checkbox" aria-label={'完成 '+row.data.title} checked={row.data.status==='done'} disabled={busy} onChange={e=>stateAction(row,e.target.checked?'status':'undo',e.target.checked?'done':undefined)}/>完成</label><button className="link-button danger" disabled={busy} onClick={()=>void removeRecord(row)} aria-label={'删除事项 '+row.data.title}>删除</button></>}</div></td></tr>)}</tbody></table></div>
           {!list?.records.length&&<div className="empty-state"><span>▤</span><h3>{!plan?'还没有计划':list?'这里还没有匹配的事项':'正在读取计划…'}</h3><p>{list?'可以调整筛选，或记下一个新想法。':'保存过的事项会在这里显示。'}</p></div>}
           <div className="pagination"><span>{list?.matched?offset+1:0}–{Math.min(offset+50,list?.matched||0)} / {list?.matched||0}</span><div><button disabled={offset===0} onClick={()=>setOffset(o=>Math.max(0,o-50))}>上一页</button><button disabled={!list||offset+50>=list.matched} onClick={()=>setOffset(o=>o+50)}>下一页</button></div></div></section>
       </>}
-      {page==='archive'&&<><div className="heading-row"><div><div className="eyebrow">KEEP YOUR HISTORY</div><h1>归档计划</h1><p className="muted">把暂时不用的方向与计划收起来，需要时再继续。</p></div></div><div className="cards">{ctx.records.map(r=><article className="info-card" key={r.id}><small>{r.kind==='direction'?'内容方向':'具体计划'}</small><h2>{label(r)}</h2><p>{r.data.archived?'已归档':'使用中'}</p><div><button disabled={busy} onClick={async()=>{const name=await prompt('修改名称',label(r));if(name?.trim())await perform(mutation(ctx,'edit',{id:r.id,changes:{name:name.trim()}},r.revision));}}>改名</button><button disabled={busy} onClick={async()=>{const goal=await prompt('修改目标',String(r.data.goal||''));if(goal!==null)await perform(mutation(ctx,'edit',{id:r.id,changes:{goal}},r.revision));}}>目标</button>{r.kind==='plan'&&<><button disabled={busy} onClick={()=>perform(mutation(ctx,'edit',{id:r.id,changes:{reviewEnabled:!r.data.reviewEnabled}},r.revision))}>{r.data.reviewEnabled?'关闭复查周期':'启用复查周期'}</button><button disabled={busy} onClick={async()=>{const defaultCriteria=await prompt('新增事项的默认完成标准',String(r.data.defaultCriteria||''));if(defaultCriteria!==null)await perform(mutation(ctx,'edit',{id:r.id,changes:{defaultCriteria}},r.revision));}}>完成标准</button></>}<button disabled={busy} onClick={async()=>{if(await perform(mutation(ctx,r.data.archived?'unarchive':'archive',{id:r.id},r.revision))&&!r.data.archived&&(r.id===plan||currentPlan?.parent_id===r.id)){planRef.current='';setPlan('');setFilter({sort:'rank'});await loadContext();}}}>{r.data.archived?'恢复':'归档'}</button></div></article>)}</div></>}
+      {page==='archive'&&<><div className="heading-row"><div><div className="eyebrow">KEEP YOUR HISTORY</div><h1>方向与计划</h1><p className="muted">修改名称和目标，或将整组内容归档、删除。</p></div></div><div className="cards">{ctx.records.filter(r=>!r.data.trashed&&!ctx.records.find(p=>p.id===r.parent_id)?.data.trashed).map(r=><article className="info-card" key={r.id}><small>{r.kind==='direction'?'内容方向':'具体计划'}</small><h2>{label(r)}</h2><p>{r.data.archived?'已归档':'使用中'}</p><div><button disabled={busy} onClick={async()=>{const name=await prompt('修改名称',label(r));if(name?.trim())await perform(mutation(ctx,'edit',{id:r.id,changes:{name:name.trim()}},r.revision));}}>改名</button><button disabled={busy} onClick={async()=>{const goal=await prompt('修改目标',String(r.data.goal||''));if(goal!==null)await perform(mutation(ctx,'edit',{id:r.id,changes:{goal}},r.revision));}}>目标</button>{r.kind==='plan'&&<><button disabled={busy} onClick={()=>perform(mutation(ctx,'edit',{id:r.id,changes:{reviewEnabled:!r.data.reviewEnabled}},r.revision))}>{r.data.reviewEnabled?'关闭复查周期':'启用复查周期'}</button><button disabled={busy} onClick={async()=>{const defaultCriteria=await prompt('新增事项的默认完成标准',String(r.data.defaultCriteria||''));if(defaultCriteria!==null)await perform(mutation(ctx,'edit',{id:r.id,changes:{defaultCriteria}},r.revision));}}>完成标准</button></>}<button disabled={busy} onClick={async()=>{if(await perform(mutation(ctx,r.data.archived?'unarchive':'archive',{id:r.id},r.revision))&&!r.data.archived&&(r.id===plan||currentPlan?.parent_id===r.id)){planRef.current='';setPlan('');setFilter({sort:'rank'});await loadContext();}}}>{r.data.archived?'恢复归档':'归档'}</button><button className="danger" disabled={busy} onClick={()=>void removeRecord(r)}>删除</button></div></article>)}</div></>}
       {page==='resources'&&<><div className="heading-row"><div><div className="eyebrow">SOURCES & GUIDELINES</div><h1>资料与规则</h1><p className="muted">每份计划关联自己的来源与规范，保留版本。</p></div><button className="primary" disabled={!plan} onClick={async()=>{const name=await prompt('资料名称');if(!name?.trim())return;const text=await prompt('资料文本（可空）');if(text===null)return;const url=await prompt('网页链接（可空）');if(url===null)return;await perform(mutation(ctx,'create',{kind:'reference',parent_id:plan,data:{name,text,url,sourceVersion:''}}));}}>＋ 添加资料</button></div>
         <div className="cards">{resources.map(r=><article className="info-card reference" key={r.id}><h2>{label(r)}</h2><small>{String(r.data.sourceVersion||'版本待补充')}</small><button disabled={busy} onClick={async()=>{const text=await prompt('更新资料文本（原文件保持原样）',String(r.data.text||''));if(text===null)return;const sourceVersion=await prompt('新快照版本',String(r.data.sourceVersion||''));if(sourceVersion===null)return;if(await confirm('文本由 '+String(r.data.text||'').length+' 字更新为 '+text.length+' 字，版本为 '+sourceVersion+'，确认保存快照？'))await perform(mutation(ctx,'edit',{id:r.id,changes:{text,sourceVersion}},r.revision));}}>更新快照</button>{safeUrl(String(r.data.url||''))&&<a href={safeUrl(String(r.data.url))!} target="_blank" rel="noreferrer">打开来源 ↗</a>}{Boolean(r.data.path)&&<button onClick={()=>navigator.clipboard.writeText(String(r.data.path)).then(()=>setNotice('路径已复制')).catch(()=>setError('复制失败，请手动选择路径'))}>复制文件路径</button>}<details><summary>查看资料文本</summary><pre>{String(r.data.text||'尚未添加文本')}</pre></details></article>)}</div>{!resources.length&&<div className="empty-state"><h3>为当前计划添加来源</h3><p>可以导入带版本的私有文本，原文件继续作为源稿保留。</p></div>}<h2 className="section-heading">批次回看</h2><div className="cards">{closures.map(c=><article className="info-card" key={c.id}><small>{dateTime(String(c.data.closedAt))}</small><h2>{String(c.data.name)}</h2><p>{c.data.mode==='completed'?'本轮完成':'本轮停止'} · {String(c.data.note||'尚未添加复盘备注')}</p><p>当时有效进度 {String((c.data.summary as {totals?:{done:number;effective:number}})?.totals?.done??'—')}/{String((c.data.summary as {totals?:{done:number;effective:number}})?.totals?.effective??'—')}</p><details><summary>查看原定范围与结项口径</summary><pre>{JSON.stringify(c.data.summary,null,2)}</pre></details><details><summary>查看结项时名单与时间</summary><pre>{JSON.stringify(c.data.members,null,2)}</pre></details><button disabled={busy} onClick={async()=>{if(await perform(mutation(ctx,'reopen_batch',{id:c.id},c.revision))){setFilter({sort:'rank',batch:String(c.data.name)});navigate('plan');}}}>重新打开这批安排</button></article>)}</div></>}
       {page==='settings'&&<><div className="heading-row"><div><div className="eyebrow">KEEP YOUR WORK</div><h1>备份与设置</h1><p className="muted">把记录留在自己手里，也为下一次继续做准备。</p></div></div>

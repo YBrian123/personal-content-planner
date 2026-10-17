@@ -9,7 +9,7 @@ export interface Item extends Record<string, unknown> {
   verifiedOn: string; informationType: string; trashed: boolean; links: Array<{label: string; url?: string; path?: string}>; related: string[];
 }
 export interface Row<T = Record<string, unknown>> { id: string; kind: Kind; parent_id: string|null; data: T; revision: number; created_at: string; updated_at: string; }
-export interface Context { generation: string; revision: number; schemaVersion: number; serverTime: string; siteName?: Row|null; records: Row[]; overview?: Array<{id:string;total:number;effective:number;done:number;cancelled:number}>; }
+export interface Context { generation: string; revision: number; schemaVersion: number; serverTime: string; siteName?: Row|null; records: Row[]; contents?:Array<{id:string;plans:number;items:number}>; overview?: Array<{id:string;total:number;effective:number;done:number;cancelled:number}>; }
 export interface Totals { original?:number; added?:number; removed?:number; total: number; effective: number; done: number; cancelled: number; content: number; support: number; started: string|null; finished: string|null; missingStart: number; missingFinish?:number; effortMinutes: number; effortCoverage: number; cancelledEffort: number; }
 export interface ListResult { records: Row<Item>[]; matched: number; totals: Totals; revision: number; }
 export interface Filter { q?: string; batch?: string; status?: string; platform?: string; group?: string; sort?: string; view?:string; trash?: boolean; }
